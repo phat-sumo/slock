@@ -1,14 +1,14 @@
-From b46028b2797b886154258dcafe71c349cdc68b43 Mon Sep 17 00:00:00 2001
-From: Blair Drummond <blair.robert.drummond@gmail.com>
-Date: Wed, 2 Oct 2019 14:59:00 -0400
-Subject: [PATCH] Add a message command. Fixes old version's bugs.
+From 53ba5a8d3608ca9c9c406b12c51c2bfdfb3e01d3 Mon Sep 17 00:00:00 2001
+From: Guy Shefy <guyshefyb@gmail.com>
+Date: Wed, 10 Feb 2021 00:17:46 +0200
+Subject: [PATCH] Add a message command with 24 bit color support
 
 ---
- config.def.h |   9 ++++
+ config.def.h |   9 +++
  config.mk    |   2 +-
  slock.1      |   7 +++
- slock.c      | 120 +++++++++++++++++++++++++++++++++++++++++++++++++--
- 4 files changed, 133 insertions(+), 5 deletions(-)
+ slock.c      | 154 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ 4 files changed, 167 insertions(+), 5 deletions(-)
 
 diff --git a/config.def.h b/config.def.h
 index 9855e21..c2a0ab2 100644
@@ -66,7 +66,7 @@ index 82cdcd6..946165f 100644
  .Sh SECURITY CONSIDERATIONS
  To make sure a locked screen can not be bypassed by switching VTs
 diff --git a/slock.c b/slock.c
-index 5ae738c..610929b 100644
+index 5ae738c..b8b7fe4 100644
 --- a/slock.c
 +++ b/slock.c
 @@ -15,6 +15,7 @@
@@ -87,14 +87,26 @@ index 5ae738c..610929b 100644
  enum {
  	INIT,
  	INPUT,
-@@ -83,6 +87,98 @@ dontkillme(void)
+@@ -83,6 +87,132 @@ dontkillme(void)
  }
  #endif
  
++static int
++readescapedint(const char *str, int *i) {
++	int n = 0;
++	if (str[*i])
++		++*i;
++	while(str[*i] && str[*i] != ';' && str[*i] != 'm') {
++		n = 10 * n + str[*i] - '0';
++		++*i;
++	}
++	return n;
++}
++
 +static void
 +writemessage(Display *dpy, Window win, int screen)
 +{
-+	int len, line_len, width, height, s_width, s_height, i, j, k, tab_replace, tab_size;
++	int len, line_len, width, height, s_width, s_height, i, k, tab_size, r, g, b, escaped_int, curr_line_len;
 +	XGCValues gr_values;
 +	XFontStruct *fontinfo;
 +	XColor color, dummy;
@@ -130,15 +142,22 @@ index 5ae738c..610929b 100644
 +	len = strlen(message);
 +
 +	/* Max max line length (cut at '\n') */
-+	line_len = 0;
++	line_len = curr_line_len = 0;
 +	k = 0;
-+	for (i = j = 0; i < len; i++) {
++	for (i = 0; i < len; i++) {
 +		if (message[i] == '\n') {
-+			if (i - j > line_len)
-+				line_len = i - j;
++			curr_line_len = 0;
 +			k++;
-+			i++;
-+			j = i;
++		} else if (message[i] == 0x1b) {
++			while (i < len && message[i] != 'm') {
++				i++;
++			}
++			if (i == len)
++				die("slock: unclosed escape sequence\n");
++		} else {
++			curr_line_len += XTextWidth(fontinfo, message + i, 1);
++			if (curr_line_len > line_len)
++				line_len = curr_line_len;
 +		}
 +	}
 +	/* If there is only one line */
@@ -153,26 +172,41 @@ index 5ae738c..610929b 100644
 +		s_width = DisplayWidth(dpy, screen);
 +		s_height = DisplayHeight(dpy, screen);
 +	}
-+
 +	height = s_height*3/7 - (k*20)/3;
-+	width  = (s_width - XTextWidth(fontinfo, message, line_len))/2;
++	width  = (s_width - line_len)/2;
 +
-+	/* Look for '\n' and print the text between them. */
-+	for (i = j = k = 0; i <= len; i++) {
-+		/* i == len is the special case for the last line */
-+		if (i == len || message[i] == '\n') {
-+			tab_replace = 0;
-+			while (message[j] == '\t' && j < i) {
-+				tab_replace++;
-+				j++;
-+			}
-+
-+			XDrawString(dpy, win, gc, width + tab_size*tab_replace, height + 20*k, message + j, i - j);
-+			while (i < len && message[i] == '\n') {
-+				i++;
-+				j = i;
++	line_len = 0;
++	/* print the text while parsing 24 bit color ANSI escape codes*/
++	for (i = k = 0; i < len; i++) {
++		switch (message[i]) {
++			case '\n':
++				line_len = 0;
++				while (message[i + 1] == '\t') {
++					line_len += tab_size;
++					i++;
++				}
 +				k++;
-+			}
++				break;
++			case 0x1b:
++				i++;
++				if (message[i] == '[') {
++					escaped_int = readescapedint(message, &i);
++					if (escaped_int == 39)
++						continue;
++					if (escaped_int != 38)
++						die("slock: unknown escape sequence%d\n", escaped_int);
++					if (readescapedint(message, &i) != 2)
++						die("slock: only 24 bit color supported\n");
++					r = readescapedint(message, &i) & 0xff;
++					g = readescapedint(message, &i) & 0xff;
++					b = readescapedint(message, &i) & 0xff;
++					XSetForeground(dpy, gc, r << 16 | g << 8 | b);
++				} else
++					die("slock: unknown escape sequence\n");
++				break;
++			default:
++				XDrawString(dpy, win, gc, width + line_len, height + 20 * k, message + i, 1);
++				line_len += XTextWidth(fontinfo, message + i, 1);
 +		}
 +	}
 +
@@ -186,7 +220,7 @@ index 5ae738c..610929b 100644
  static const char *
  gethash(void)
  {
-@@ -194,6 +290,7 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
+@@ -194,6 +324,7 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
  					                     locks[screen]->win,
  					                     locks[screen]->colors[color]);
  					XClearWindow(dpy, locks[screen]->win);
@@ -194,7 +228,7 @@ index 5ae738c..610929b 100644
  				}
  				oldc = color;
  			}
-@@ -300,7 +397,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
+@@ -300,7 +431,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
  static void
  usage(void)
  {
@@ -203,7 +237,7 @@ index 5ae738c..610929b 100644
  }
  
  int
-@@ -313,12 +410,25 @@ main(int argc, char **argv) {
+@@ -313,12 +444,25 @@ main(int argc, char **argv) {
  	gid_t dgid;
  	const char *hash;
  	Display *dpy;
@@ -230,7 +264,7 @@ index 5ae738c..610929b 100644
  	default:
  		usage();
  	} ARGEND
-@@ -363,10 +473,12 @@ main(int argc, char **argv) {
+@@ -363,10 +507,12 @@ main(int argc, char **argv) {
  	if (!(locks = calloc(nscreens, sizeof(struct lock *))))
  		die("slock: out of memory\n");
  	for (nlocks = 0, s = 0; s < nscreens; s++) {
@@ -246,5 +280,5 @@ index 5ae738c..610929b 100644
  	XSync(dpy, 0);
  
 -- 
-2.20.1
+2.30.0
 
