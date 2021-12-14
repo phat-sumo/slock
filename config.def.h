@@ -19,7 +19,7 @@ static const char * message = "Welcome back! Staying long?";
 static const char * text_color = "#fbf5f3";
 
 /* font name (must be a valid size) */
-static const char * font_name = "-misc-fixed-medium-r-semicondensed--0-0-75-75-c-0-iso8859-1";
+static const char * font_name = "Monoid:style=Retina:pixelsize=10:antialias=true:autohint=false";
 // static const char * font_name = "-*-monoid-light-r-*--12-*-100-100-p-0-iso8859-1";
 
 

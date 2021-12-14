@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <fontconfig/fontconfig.h>
 #include <X11/extensions/Xrandr.h>
 #include <X11/extensions/Xinerama.h>
 #include <X11/keysym.h>
@@ -95,46 +96,29 @@ dontkillme(void)
 }
 #endif
 
-static int
-readescapedint(const char *str, int *i) {
-	int n = 0;
-	if (str[*i])
-		++*i;
-	while(str[*i] && str[*i] != ';' && str[*i] != 'm') {
-		n = 10 * n + str[*i] - '0';
-		++*i;
-	}
-	return n;
-}
-
 static void
 writemessage(Display *dpy, Window win, int screen)
 {
-	int len, line_len, width, height, s_width, s_height, i, k, tab_size, r, g, b, escaped_int, curr_line_len;
-	XGCValues gr_values;
-	XFontStruct *fontinfo;
-	XColor color, dummy;
+	int len, line_len, width, height, s_width, s_height, i, j, k, tab_replace, tab_size;
+	XftFont *fontinfo;
+	XftColor xftcolor;
+	XftDraw *xftdraw;
+	XGlyphInfo ext_msg, ext_space;
 	XineramaScreenInfo *xsi;
-	GC gc;
-	fontinfo = XLoadQueryFont(dpy, font_name);
+	xftdraw = XftDrawCreate(dpy, win, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen));
+	fontinfo = XftFontOpenName(dpy, screen, font_name);
+	XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), text_color, &xftcolor);
 
 	if (fontinfo == NULL) {
 		if (count_error == 0) {
 			fprintf(stderr, "slock: Unable to load font \"%s\"\n", font_name);
-			fprintf(stderr, "slock: Try listing fonts with 'slock -f'\n");
 			count_error++;
 		}
 		return;
 	}
 
-	tab_size = 8 * XTextWidth(fontinfo, " ", 1);
-
-	XAllocNamedColor(dpy, DefaultColormap(dpy, screen),
-		 text_color, &color, &dummy);
-
-	gr_values.font = fontinfo->fid;
-	gr_values.foreground = color.pixel;
-	gc=XCreateGC(dpy,win,GCFont+GCForeground, &gr_values);
+	XftTextExtentsUtf8(dpy, fontinfo, (XftChar8 *) " ", 1, &ext_space);
+	tab_size = 8 * ext_space.width;
 
 	/*  To prevent "Uninitialized" warnings. */
 	xsi = NULL;
@@ -146,22 +130,15 @@ writemessage(Display *dpy, Window win, int screen)
 	len = strlen(message);
 
 	/* Max max line length (cut at '\n') */
-	line_len = curr_line_len = 0;
+	line_len = 0;
 	k = 0;
-	for (i = 0; i < len; i++) {
+	for (i = j = 0; i < len; i++) {
 		if (message[i] == '\n') {
-			curr_line_len = 0;
+			if (i - j > line_len)
+				line_len = i - j;
 			k++;
-		} else if (message[i] == 0x1b) {
-			while (i < len && message[i] != 'm') {
-				i++;
-			}
-			if (i == len)
-				die("slock: unclosed escape sequence\n");
-		} else {
-			curr_line_len += XTextWidth(fontinfo, message + i, 1);
-			if (curr_line_len > line_len)
-				line_len = curr_line_len;
+			i++;
+			j = i;
 		}
 	}
 	/* If there is only one line */
@@ -176,47 +153,37 @@ writemessage(Display *dpy, Window win, int screen)
 		s_width = DisplayWidth(dpy, screen);
 		s_height = DisplayHeight(dpy, screen);
 	}
-	height = s_height*3/7 - (k*20)/3;
-	width  = (s_width - line_len)/2;
 
-	line_len = 0;
-	/* print the text while parsing 24 bit color ANSI escape codes*/
-	for (i = k = 0; i < len; i++) {
-		switch (message[i]) {
-			case '\n':
-				line_len = 0;
-				while (message[i + 1] == '\t') {
-					line_len += tab_size;
-					i++;
-				}
-				k++;
-				break;
-			case 0x1b:
+	XftTextExtentsUtf8(dpy, fontinfo, (XftChar8 *)message, line_len, &ext_msg);
+	height = s_height*3/7 - (k*20)/3;
+	width  = (s_width - ext_msg.width)/2;
+
+	/* Look for '\n' and print the text between them. */
+	for (i = j = k = 0; i <= len; i++) {
+		/* i == len is the special case for the last line */
+		if (i == len || message[i] == '\n') {
+			tab_replace = 0;
+			while (message[j] == '\t' && j < i) {
+				tab_replace++;
+				j++;
+			}
+
+			XftDrawStringUtf8(xftdraw, &xftcolor, fontinfo, width + tab_size*tab_replace, height + 20*k, (XftChar8 *)(message + j), i - j);
+			while (i < len && message[i] == '\n') {
 				i++;
-				if (message[i] == '[') {
-					escaped_int = readescapedint(message, &i);
-					if (escaped_int == 39)
-						continue;
-					if (escaped_int != 38)
-						die("slock: unknown escape sequence%d\n", escaped_int);
-					if (readescapedint(message, &i) != 2)
-						die("slock: only 24 bit color supported\n");
-					r = readescapedint(message, &i) & 0xff;
-					g = readescapedint(message, &i) & 0xff;
-					b = readescapedint(message, &i) & 0xff;
-					XSetForeground(dpy, gc, r << 16 | g << 8 | b);
-				} else
-					die("slock: unknown escape sequence\n");
-				break;
-			default:
-				XDrawString(dpy, win, gc, width + line_len, height + 20 * k, message + i, 1);
-				line_len += XTextWidth(fontinfo, message + i, 1);
+				j = i;
+				k++;
+			}
 		}
 	}
 
 	/* xsi should not be NULL anyway if Xinerama is active, but to be safe */
 	if (XineramaIsActive(dpy) && xsi != NULL)
 			XFree(xsi);
+
+	XftFontClose(dpy, fontinfo);
+	XftColorFree(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), &xftcolor);
+	XftDrawDestroy(xftdraw);
 }
 
 
